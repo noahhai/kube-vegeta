@@ -1,0 +1,23 @@
+apiVersion: apps/v1beta1
+kind: Deployment
+metadata:
+  name: api-deployment
+  labels:
+    app: api
+spec:
+  selector:
+    matchLabels:
+      app: api
+  replicas: 1
+  template:
+    metadata:
+      labels:
+        app: api
+    spec:
+      containers:
+      - name: api
+        image: 661058921700.dkr.ecr.us-east-1.amazonaws.com/test-grpc-api
+        imagePullPolicy: Always
+        ports:
+        - name: api-service
+          containerPort: 3000 

@@ -1,0 +1,3 @@
+[submodule "k8s-mastery"]
+	path = k8s-mastery
+	url = https://github.com/rinormaloku/k8s-mastery

@@ -1,0 +1,17 @@
+#FROM golang:1.9.1
+
+#WORKDIR /go/src/github.com/noahhai/kube-vegeta/grpc/gcd
+#COPY gcd .
+#COPY pb ../pb
+
+#RUN go get -d -v ./...
+#RUN go install -v ./...
+
+#CMD [ "gcd" ]
+
+FROM scratch
+COPY gcd/main main
+
+EXPOSE 3000
+
+CMD [ "/main" ]

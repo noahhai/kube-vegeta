@@ -1,0 +1,23 @@
+apiVersion: apps/v1beta1
+kind: Deployment
+metadata:
+  name: gcd-deployment
+  labels:
+    app: gcd
+spec:
+  selector:
+    matchLabels:
+      app: gcd
+  replicas: 1
+  template:
+    metadata:
+      labels:
+        app: gcd
+    spec:
+      containers:
+      - name: gcd
+        image: 661058921700.dkr.ecr.us-east-1.amazonaws.com/test-grpc-gcd
+        imagePullPolicy: Always
+        ports:
+        - name: gcd-service
+          containerPort: 3000
