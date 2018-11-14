@@ -1,66 +1,45 @@
 package main
 
 import (
-	"flag"
+	"bytes"
+	"encoding/json"
+	"errors"
 	"fmt"
+	"io/ioutil"
 	"math/rand"
-	"os"
+	"net/http"
 	"os/exec"
-	"path"
-	"path/filepath"
 	"regexp"
 	"runtime"
 	"strings"
+	"sync"
 
 	"github.com/gobuffalo/uuid"
 	"github.com/icrowley/fake"
 )
 
-var tenantName string
-var initialAdmin LocalUser
-var allCommands SyncCommandSet
-var currDir string
-var binaryName = "thy"
-
-var (
-	numberUsers       = flag.Int("users", 100, "Number of users to create")
-	numberSecrets     = flag.Int("secrets", 500, "Number of secrets to create")
-	numberPermissions = flag.Int("permissions", 50, "Unique Permissions Per User")
-	secretLength      = flag.Int("secret-length", 100, "Length of each secret data")
-)
-
-func take(done <-chan interface{}, valueStream <-chan interface{}, num int) <-chan interface{} {
-	takeStream := make(chan interface{})
-	go func() {
-		defer close(takeStream)
-		for i := 0; i < num; i++ {
-			select {
-			case <-done:
-				return
-			case takeStream <- <-valueStream:
-			}
-		}
-	}()
-	return takeStream
-}
-
-func HandleCommands(cmdPipe <-chan Command, cancelPipe <-chan interface{}, resultPipe chan<- CmdResult) {
+func HandleCommands(cmdPipe <-chan Command, errPipe chan interface{}, resultPipe chan<- CmdResult, wg *sync.WaitGroup) {
 	for {
 		select {
-		case <-cancelPipe:
-			return
+		// case err := <-errPipe:
+		// 	// forward to next worker
+		// 	errPipe <- err
+		// 	return
 		case c := <-cmdPipe:
-			cmd := exec.Command(path.Join(currDir, binaryName), c.GetArgs()...)
+			cmdArgs := addConfigArg(c.GetArgs())
+			cmd := exec.Command(binaryName, cmdArgs...)
 			output, err := cmd.CombinedOutput()
 
 			if err != nil {
-				fmt.Println("Error executing command: " + strings.Join(c.GetArgs(), " "))
-				fmt.Println(err)
+				errFull := fmt.Errorf("Err executing cmd: thy %s\nErr: %s\nOutput: %s\n%s", strings.Join(cmdArgs, " "), err, string(output))
+				errPipe <- errFull
 			} else {
-				// TODO : if we need output
-				_ = output
+				fmt.Printf(" " + strings.ToLower(c.GetType())[:1])
+				// TODO : if we need output for future actions
+				// _ = output
 				//resultPipe <- resultFromCmd(c.ResourceType, c.C)
 			}
+			wg.Done()
 		}
 	}
 }
@@ -90,19 +69,46 @@ func resultFromCmd(t, cmd string) CmdResult {
 func DoSetup() error {
 
 	cmdPipe := make(chan Command)
-	cancelPipe := make(chan interface{})
+	defer close(cmdPipe)
+	errPipe := make(chan interface{})
+	finishPipe := make(chan bool)
+	defer close(finishPipe)
 	resultPipe := make(chan CmdResult)
+	defer close(resultPipe)
 
 	numWorkers := runtime.NumCPU()
 	_ = numWorkers
-
+	var wg sync.WaitGroup
+	fmt.Printf("Creating %d workers for setup\n", numWorkers)
 	for i := 0; i < numWorkers; i++ {
-		go HandleCommands(cmdPipe, cancelPipe, resultPipe)
+		go HandleCommands(cmdPipe, errPipe, resultPipe, &wg)
 	}
 
-	for _, syncSetMember := range allCommands {
+	fmt.Println("Beginning operations/object creation (c=config,u=user,s=secret,p=permission): ")
+
+	// TODO : optimize permisison creation by building config json locally and updating all at once
+	for i, syncSetMember := range allCommands {
+
+		fmt.Printf("Beginning stage %d; %d operations\n", i, len(syncSetMember))
+		wg.Add(len(syncSetMember))
+
+		go func() {
+			wg.Wait()
+			finishPipe <- true
+		}()
 		for _, asyncCommand := range syncSetMember {
 			cmdPipe <- asyncCommand
+		}
+		select {
+		case <-finishPipe:
+			fmt.Println("")
+			fmt.Printf("Finished stage %d\n", i)
+		case err := <-errPipe:
+			close(cmdPipe)
+			fmt.Println("")
+			fmt.Printf("Op cancelled at stage %d due to error\n: %v", i, err)
+			close(errPipe)
+			break
 		}
 	}
 
@@ -111,120 +117,9 @@ func DoSetup() error {
 
 func addConfigArg(args []string) []string {
 	args = append(args, "--config")
-	args = append(args, "config/.thy.yml")
+	args = append(args, ".thy.yml")
 	return args
 }
-
-func addLocalProfileArg(args []string) []string {
-	args = append(args, "--profile")
-	args = append(args, "local")
-	return args
-}
-
-func main() {
-	p, _ := os.Getwd()
-	sep := ""
-	for true {
-		elems := strings.Split(p, string(filepath.Separator))
-		f := elems[len(elems)-1]
-		p = strings.Join(elems[:len(elems)-1], string(filepath.Separator))
-		if f == "thy" {
-			break
-		} else if f == "" {
-			os.Exit(1)
-		}
-		sep = sep + "../"
-	}
-	err := os.Chdir(sep)
-	if err != nil {
-		fmt.Printf("could not change dir: %v", err)
-		os.Exit(1)
-	}
-
-	make := exec.Command("make")
-	err = make.Run()
-	if err != nil {
-		fmt.Printf("could not make binary for %s: %v", binaryName, err)
-		os.Exit(1)
-	}
-	status := 0
-	err = DoSetup()
-	if err != nil {
-		fmt.Println(err)
-		status = 1
-	}
-	os.Exit(status)
-}
-
-type Command interface {
-	GetArgs() []string
-	GetType() string
-}
-
-type UserCreateCommand struct {
-	Name string
-	Pass string
-}
-
-func (c *UserCreateCommand) GetType() string { return "user" }
-func (c *UserCreateCommand) GetArgs() []string {
-	return []string{
-		"user",
-		"create",
-		"--username",
-		c.Name,
-		"password",
-		c.Pass,
-	}
-}
-
-type SecretCreateCommand struct {
-	Path string
-	Data string
-}
-
-func (c *SecretCreateCommand) GetType() string { return "secret" }
-func (c *SecretCreateCommand) GetArgs() []string {
-	return []string{
-		"secret",
-		"create",
-		"--path",
-		c.Path,
-		"--data",
-		c.Data,
-	}
-}
-
-type PermissionCreateCommand struct {
-	Path string
-	User string
-}
-
-func (c *PermissionCreateCommand) GetType() string { return "permission" }
-func (c *PermissionCreateCommand) GetArgs() []string {
-	return []string{
-		"secret",
-		"permission",
-		"create",
-		"--subject",
-		c.User,
-		"--path",
-		c.Path,
-		"--action",
-		"<read|delete|create|update>",
-		"--effect",
-		"allow",
-	}
-}
-
-type CmdResult struct {
-	Type   string
-	Fields map[string]string
-}
-
-type AsyncCommandSet []Command
-
-type SyncCommandSet []AsyncCommandSet
 
 type LocalUser struct {
 	Name string
@@ -286,47 +181,44 @@ func addNodeToTree(root, node *Node) {
 	currNode.Children = append(currNode.Children, node)
 }
 
-func init() {
-	if dir, err := os.Getwd(); err != nil {
-		panic(err)
-	} else {
-		currDir = dir
-	}
-
-	u, _ := uuid.NewV4()
-	_ = u
-	// TODO : Initial provisioning
-	tenantName = "ambarco2"
-	initialAdmin = LocalUser{
-		Name: "noah",
-		Pass: "noah@1",
-	}
-
+func initData() {
 	allCommands = SyncCommandSet{}
 
-	userCreateCommands := AsyncCommandSet{}
-	allCommands = append(allCommands, userCreateCommands)
-
-	secretCreateCommands := AsyncCommandSet{}
-	allCommands = append(allCommands, secretCreateCommands)
-
-	permissionCreateCommands := AsyncCommandSet{}
-	allCommands = append(allCommands, permissionCreateCommands)
+	// update local config - do this rather than passing as flags for efficiency (cache auth token)
+	localConfigCommands := []Command{
+		&ConfigCommand{
+			Path: "tenant",
+			Val:  *tenant,
+		},
+		&ConfigCommand{
+			Path: "auth.username",
+			Val:  *adminUser,
+		},
+		&ConfigCommand{
+			Path: "auth.password",
+			Val:  *adminEndpoint + "@1",
+		},
+		&ConfigCommand{
+			Path: "domain",
+			Val:  *domain,
+		},
+	}
+	allCommands = append(allCommands, localConfigCommands)
 
 	userList := []string{}
-
+	// creation of users / secrets can happen simultaneously
+	userSecretCreateCommands := make(AsyncCommandSet, 0, *numberUsers+*numberSecrets)
 	for i := 0; i < *numberUsers; i++ {
-		name := fake.FullName()
+		name := fake.EmailAddress()
 		userList = append(userList, name)
 		pass, _ := uuid.NewV4()
-		userCreateCommands = append(userCreateCommands, &UserCreateCommand{
+		userSecretCreateCommands = append(userSecretCreateCommands, &UserCreateCommand{
 			Name: name,
 			Pass: pass.String(),
 		})
 	}
 
 	secretTreeRoot := buildTreeRoot()
-
 	for i := 0; i < *numberSecrets; i++ {
 		secretName := fake.IPv4()
 		secretNode := NewNode(secretName, nil)
@@ -335,20 +227,64 @@ func init() {
 
 		data := fake.CharactersN(*secretLength)
 
-		secretCreateCommands = append(secretCreateCommands, &SecretCreateCommand{
+		userSecretCreateCommands = append(userSecretCreateCommands, &SecretCreateCommand{
 			Path: secretPath,
 			Data: data,
 		})
 	}
+	allCommands = append(allCommands, userSecretCreateCommands)
 
+	numberPermissions := *numberUsers * *numberPermissions
+	permissionCreateCommands := make(AsyncCommandSet, 0, numberPermissions)
 	rootFolders := getFirstLevelPaths(secretTreeRoot)
 	for _, u := range userList {
 		for _, p := range rootFolders {
 			permissionCreateCommands = append(permissionCreateCommands, &PermissionCreateCommand{
 				User: fmt.Sprintf("users:%s", u),
-				Path: fmt.Sprintf("%s/*", p),
+				Path: fmt.Sprintf("%s/<.*>", p),
 			})
 		}
 	}
+	allCommands = append(allCommands, permissionCreateCommands)
+}
 
+func initTenant() error {
+	// create tenant
+	url := *adminEndpoint
+	if !strings.HasSuffix(url, "/") {
+		url = url + "/"
+	}
+	url = url + "tenant"
+	fmt.Println("create request to: " + url + " for tenant: " + *tenant)
+
+	body := map[string]interface{}{
+		"tenant": *tenant,
+		"user":   *adminUser,
+	}
+
+	asBytes, err := json.Marshal(body)
+	if err != nil {
+		fmt.Println("failed to marshal create tenant request body")
+		return err
+	}
+
+	resp, err := http.Post(url, "application/json", bytes.NewBuffer(asBytes))
+	if err != nil {
+		fmt.Println("failed to post to tenant create endpoint")
+		return err
+	}
+	if resp.StatusCode < 200 || resp.StatusCode > 300 {
+		fmt.Println("Failed request")
+		return errors.New("Failed to create tenant")
+	}
+	defer resp.Body.Close()
+
+	respBody, err := ioutil.ReadAll(resp.Body)
+	if err != nil {
+		fmt.Println("failed to read delete request response")
+		return err
+	} else {
+		fmt.Println("response: ", string(respBody))
+	}
+	return nil
 }

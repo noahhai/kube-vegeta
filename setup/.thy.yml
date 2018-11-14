@@ -1,0 +1,13 @@
+default:
+  auth:
+    password: https://7h1u0s6a44.execute-api.us-east-1.amazonaws.com/Prod@1
+    type: password
+    username: admin
+  cache:
+    age: 60
+    strategy: cache.server
+  domain: qabambe.com
+  http: https
+  store:
+    type: file
+  tenant: fatz
