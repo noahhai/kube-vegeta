@@ -1,19 +1,3 @@
-/*
-Copyright 2015 The Kubernetes Authors.
-
-Licensed under the Apache License, Version 2.0 (the "License");
-you may not use this file except in compliance with the License.
-You may obtain a copy of the License at
-
-    http://www.apache.org/licenses/LICENSE-2.0
-
-Unless required by applicable law or agreed to in writing, software
-distributed under the License is distributed on an "AS IS" BASIS,
-WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-See the License for the specific language governing permissions and
-limitations under the License.
-*/
-
 package main
 
 import (
@@ -25,11 +9,10 @@ import (
 	"sync"
 	"time"
 
-	"k8s.io/kubernetes/pkg/api"
-	client "k8s.io/kubernetes/pkg/client/unversioned"
-	"k8s.io/kubernetes/pkg/client/unversioned/clientcmd"
-	"k8s.io/kubernetes/pkg/fields"
-	"k8s.io/kubernetes/pkg/labels"
+	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/client-go/kubernetes"
+	"k8s.io/client-go/rest"
 
 	vegeta "github.com/tsenart/vegeta/lib"
 )
@@ -89,37 +72,26 @@ func getField(obj map[string]interface{}, fields ...string) (interface{}, bool) 
 	}
 	return nextObj, true
 }
-func loadData() {
-	config := clientcmd.NewNonInteractiveDeferredLoadingClientConfig(&clientcmd.ClientConfigLoadingRules{}, &clientcmd.ConfigOverrides{})
-	clientConfig, err := config.ClientConfig()
+func loadData() error {
+
+	config, err := rest.InClusterConfig()
 	if err != nil {
-		fmt.Printf("Error creating client config: %v", err)
-		return
+		fmt.Printf("Error creating config: %v", err)
+		return err
 	}
-	c, err := client.New(clientConfig)
+	clientset, err := kubernetes.NewForConfig(config)
 	if err != nil {
-		fmt.Printf("Error creating client: %v", err)
-		return
+		fmt.Printf("Error client: %v", err)
+		return err
 	}
-	var labelSelector labels.Selector
-	if *selector != "" {
-		labelSelector, err = labels.Parse(*selector)
-		if err != nil {
-			fmt.Printf("Parse label selector err: %v", err)
-			return
-		}
-	} else {
-		labelSelector = labels.Everything()
-	}
-	pods, err := c.Pods(api.NamespaceDefault).List(api.ListOptions{
-		LabelSelector: labelSelector,
-		FieldSelector: fields.Everything(),
+	pods, err := clientset.CoreV1().Pods("").List(metav1.ListOptions{
+		LabelSelector: *selector,
 	})
 	if err != nil {
 		fmt.Printf("Error getting pods: %v", err)
-		return
+		return err
 	}
-	loadbots := []*api.Pod{}
+	loadbots := []*corev1.Pod{}
 	for ix := range pods.Items {
 		pod := &pods.Items[ix]
 		if pod.Status.PodIP == "" {
@@ -150,7 +122,7 @@ func loadData() {
 				}
 			} else {
 				var err error
-				data, err = c.RESTClient.Get().AbsPath("/api/v1/namespaces/default/pods/" + pod.Name + ":8080/proxy/").DoRaw()
+				data, err = clientset.RESTClient().Get().AbsPath("/api/v1/namespaces/default/pods/" + pod.Name + ":8080/proxy/").DoRaw()
 				if err != nil {
 					fmt.Printf("Error proxying to pod: %v\n", err)
 					return
@@ -173,4 +145,9 @@ func loadData() {
 	}
 	setData(data)
 	fmt.Printf("Updated.\n")
+	return nil
+}
+
+func discoverPodsForLabel(label string) []corev1.Pod {
+	return nil
 }
