@@ -33,7 +33,8 @@ func DoTeardown() error {
 		fmt.Println("failed to read delete request response")
 		return err
 	} else {
-		fmt.Println("response: ", string(respBody))
+		fmt.Println("response: " + string(respBody))
+
 	}
 	return nil
 }

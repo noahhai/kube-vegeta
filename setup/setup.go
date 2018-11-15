@@ -18,29 +18,32 @@ import (
 	"github.com/icrowley/fake"
 )
 
-func HandleCommands(cmdPipe <-chan Command, errPipe chan interface{}, resultPipe chan<- CmdResult, wg *sync.WaitGroup) {
-	for {
-		select {
-		// case err := <-errPipe:
-		// 	// forward to next worker
-		// 	errPipe <- err
-		// 	return
-		case c := <-cmdPipe:
-			cmdArgs := addConfigArg(c.GetArgs())
-			cmd := exec.Command(binaryName, cmdArgs...)
-			output, err := cmd.CombinedOutput()
+func HandleCommands(cmdPipe <-chan Command, errPipe chan<- interface{}, resultPipe chan<- CmdResult, wg *sync.WaitGroup) {
 
-			if err != nil {
-				errFull := fmt.Errorf("Err executing cmd: thy %s\nErr: %s\nOutput: %s\n%s", strings.Join(cmdArgs, " "), err, string(output))
-				errPipe <- errFull
-			} else {
-				fmt.Printf(" " + strings.ToLower(c.GetType())[:1])
-				// TODO : if we need output for future actions
-				// _ = output
-				//resultPipe <- resultFromCmd(c.ResourceType, c.C)
-			}
-			wg.Done()
+	for {
+		c, ok := <-cmdPipe
+		if !ok {
+			return
 		}
+		if len(c.GetArgs()) == 0 {
+			continue
+		}
+		cmdArgs := addConfigArg(c.GetArgs())
+		cmd := exec.Command(binaryName, cmdArgs...)
+		output, err := cmd.CombinedOutput()
+
+		if err != nil {
+			errFull := fmt.Errorf("err executing cmd: thy %s\nErr: \n%s\nOutput:\n %s", strings.Join(cmdArgs, " "), err, string(output))
+			fmt.Println(errFull)
+			errPipe <- errFull
+			return
+		} else {
+			fmt.Printf(" " + strings.ToLower(c.GetType())[:1])
+			// TODO : if we need output for future actions
+			// _ = output
+			//resultPipe <- resultFromCmd(c.ResourceType, c.C)
+		}
+		wg.Done()
 	}
 }
 
@@ -66,26 +69,27 @@ func resultFromCmd(t, cmd string) CmdResult {
 	return CmdResult{}
 }
 
-func DoSetup() error {
-
-	cmdPipe := make(chan Command)
+func populateRemoteTenant() error {
+	numWorkers := runtime.NumCPU() - 1
+	cmdPipe := make(chan Command, *numberUsers+*numberSecrets)
 	defer close(cmdPipe)
-	errPipe := make(chan interface{})
+	errPipe := make(chan interface{}, numWorkers)
 	finishPipe := make(chan bool)
 	defer close(finishPipe)
 	resultPipe := make(chan CmdResult)
 	defer close(resultPipe)
 
-	numWorkers := runtime.NumCPU()
-	_ = numWorkers
 	var wg sync.WaitGroup
 	fmt.Printf("Creating %d workers for setup\n", numWorkers)
 	for i := 0; i < numWorkers; i++ {
-		go HandleCommands(cmdPipe, errPipe, resultPipe, &wg)
+		go func() {
+			HandleCommands(cmdPipe, errPipe, resultPipe, &wg)
+		}()
 	}
 
 	fmt.Println("Beginning operations/object creation (c=config,u=user,s=secret,p=permission): ")
 
+	errored := false
 	// TODO : optimize permisison creation by building config json locally and updating all at once
 	for i, syncSetMember := range allCommands {
 
@@ -96,20 +100,28 @@ func DoSetup() error {
 			wg.Wait()
 			finishPipe <- true
 		}()
-		for _, asyncCommand := range syncSetMember {
-			cmdPipe <- asyncCommand
-		}
+		go func() {
+			for _, asyncCommand := range syncSetMember {
+				if errored {
+					return
+				}
+				cmdPipe <- asyncCommand
+			}
+		}()
 		select {
 		case <-finishPipe:
 			fmt.Println("")
 			fmt.Printf("Finished stage %d\n", i)
-		case err := <-errPipe:
-			close(cmdPipe)
+			break
+		case e := <-errPipe:
+			errored = true
 			fmt.Println("")
-			fmt.Printf("Op cancelled at stage %d due to error\n: %v", i, err)
-			close(errPipe)
+			fmt.Printf("Op cancelled at stage %d due to error\n: %v", i, e)
 			break
 		}
+	}
+	if !errored {
+		fmt.Println("Finished setup")
 	}
 
 	return nil
@@ -181,29 +193,42 @@ func addNodeToTree(root, node *Node) {
 	currNode.Children = append(currNode.Children, node)
 }
 
-func initData() {
+func prepareDataLocally() {
 	allCommands = SyncCommandSet{}
 
+	// need to clear auth from last call
+	allCommands = append(allCommands, []Command{
+		&BaseCommand{
+			Args: []string{"auth", "clear"},
+		},
+	})
+
 	// update local config - do this rather than passing as flags for efficiency (cache auth token)
-	localConfigCommands := []Command{
+	// TODO : make concurrency safe
+	allCommands = append(allCommands, []Command{
 		&ConfigCommand{
 			Path: "tenant",
 			Val:  *tenant,
 		},
+	})
+	allCommands = append(allCommands, []Command{
 		&ConfigCommand{
 			Path: "auth.username",
 			Val:  *adminUser,
 		},
+	})
+	allCommands = append(allCommands, []Command{
 		&ConfigCommand{
 			Path: "auth.password",
-			Val:  *adminEndpoint + "@1",
+			Val:  adminPassword,
 		},
+	})
+	allCommands = append(allCommands, []Command{
 		&ConfigCommand{
 			Path: "domain",
 			Val:  *domain,
 		},
-	}
-	allCommands = append(allCommands, localConfigCommands)
+	})
 
 	userList := []string{}
 	// creation of users / secrets can happen simultaneously
@@ -248,7 +273,7 @@ func initData() {
 	allCommands = append(allCommands, permissionCreateCommands)
 }
 
-func initTenant() error {
+func createRemoteTenant() error {
 	// create tenant
 	url := *adminEndpoint
 	if !strings.HasSuffix(url, "/") {

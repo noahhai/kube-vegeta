@@ -1,6 +1,6 @@
 default:
   auth:
-    password: https://7h1u0s6a44.execute-api.us-east-1.amazonaws.com/Prod@1
+    password: admin@1
     type: password
     username: admin
   cache:
@@ -10,4 +10,4 @@ default:
   http: https
   store:
     type: file
-  tenant: fatz
+  tenant: thoughtsphere

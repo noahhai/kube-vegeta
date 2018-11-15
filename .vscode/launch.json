@@ -5,13 +5,22 @@
     "version": "0.2.0",
     "configurations": [
         {
-            "name": "Debug-Setup -Small",
+            "name": "Cli-Small",
             "type": "go",
             "request": "launch",
             "mode": "auto",
             "program": "${workspaceRoot}/setup",
             "env": {},
             "args": ["--operation","setup","--users","10", "--secrets", "10", "--permissions", "2"] //, "-cli-version", "0.1.1"]
+        },
+        {
+            "name": "Serve",
+            "type": "go",
+            "request": "launch",
+            "mode": "auto",
+            "program": "${workspaceRoot}/setup",
+            "env": {},
+            "args": ["--serve"] //, "-cli-version", "0.1.1"]
         }
     ]
 }

@@ -1,8 +1,11 @@
+// TODO : make this concurrency safe when run in serve mode; spin a context off of the global flags
 package main
 
 import (
+	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"os"
 	"os/exec"
@@ -10,9 +13,8 @@ import (
 	"runtime"
 	"strings"
 
-	flag "github.com/spf13/pflag"
-
 	"github.com/icrowley/fake"
+	flag "github.com/spf13/pflag"
 )
 
 var initialAdmin LocalUser
@@ -22,11 +24,14 @@ var binaryName string
 var defaultCliVersion = "0.1.1"
 
 var (
+	serve             = flag.Bool("serve", false, "Specifies if the app should run in server mode")
+	port              = flag.Int("port", 3000, "Port to run on if --serve flag specified")
 	tenant            = flag.StringP("tenant", "t", "", "Tenant name to create")
 	adminEndpoint     = flag.StringP("admin-endpoint", "a", "https://7h1u0s6a44.execute-api.us-east-1.amazonaws.com/Prod", "Admin Endpoint. Default is QA")
 	adminUser         = flag.String("admin-user", "admin", "Admin user for tenant")
+	adminPassword     string
 	domain            = flag.StringP("domain", "d", "qabambe.com", "Tenant domain. Default is qabambe.com")
-	operation         = flag.StringP("operation", "o", "", "Operation to conduct [setup|teardown]")
+	operation         = flag.StringP("operation", "o", "", "Operation to conduct [setup|teardown|test|full]")
 	numberUsers       = flag.IntP("users", "u", 100, "Number of users to create")
 	numberSecrets     = flag.IntP("secrets", "s", 500, "Number of secrets to create")
 	numberPermissions = flag.IntP("permissions", "p", 50, "Unique Permissions Per User")
@@ -35,9 +40,41 @@ var (
 )
 
 func main() {
+	onStartup()
+	validateCmd()
+
+	if *serve {
+		http.HandleFunc("/command", serveFunc)
+		log.Fatal(http.ListenAndServe(fmt.Sprintf(":%d", *port), nil))
+	}
+
+	if !ensureCliDownloaded() {
+		os.Exit(1)
+	}
+	preRun()
+	os.Exit(runTasks())
+}
+
+func onStartup() {
 	flag.Parse()
+	currDir, _ = os.Getwd()
+}
+
+func preRun() {
+	// TODO : update this as we change it
+	adminPassword = *adminUser + "@1"
 	*tenant = strings.ToLower(*tenant)
-	if *operation != "setup" && *operation != "teardown" {
+	if *tenant == "" {
+		*tenant = strings.Replace(strings.ToLower(fake.Company()), " ", "-", -1)
+		fmt.Println("blank tenant name. generated random: " + *tenant)
+	}
+}
+
+func validateCmd() {
+	if *serve {
+		return
+	}
+	if *operation != "setup" && *operation != "teardown" && *operation != "test" && *operation != "full" {
 		fmt.Printf("error: operation flag did not match op. Value: '%s'\n", *operation)
 		flag.Usage()
 		os.Exit(1)
@@ -46,44 +83,99 @@ func main() {
 		flag.Usage()
 		os.Exit(1)
 	}
-
-	currDir, _ = os.Getwd()
-	ensureCliDownloaded()
-
-	if *tenant == "" {
-		*tenant = strings.Replace(strings.ToLower(fake.Company()), " ", "-", -1)
-		fmt.Println("blank tenant name. generated random: " + *tenant)
-	}
-
-	status := 0
-	if *operation == "setup" {
-		// create tenant
-		err := initTenant()
-		if err != nil {
-			fmt.Println("failed to create tenant")
-			os.Exit(1)
-		}
-		// create data structures in memory for tenant
-		initData()
-
-		// create data structures on tenant
-		err = DoSetup()
-		if err != nil {
-			fmt.Println(err)
-			status = 1
-		}
-		os.Exit(status)
-	} else if *operation == "teardown" {
-		err := DoTeardown()
-		if err != nil {
-			fmt.Println(err)
-			status = 1
-		}
-	}
-	os.Exit(status)
 }
 
-func ensureCliDownloaded() {
+func taskSetup() (status int) {
+	log.Println("---Starting setup task")
+	err := createRemoteTenant()
+	if err != nil {
+		fmt.Println("failed to create tenant")
+		return 1
+	}
+
+	prepareDataLocally()
+
+	err = populateRemoteTenant()
+	if err != nil {
+		fmt.Println(err)
+		return 1
+	}
+	log.Println("---Finished setup task")
+	return 0
+}
+
+func taskTeardown() (status int) {
+	log.Println("---Starting teardown task")
+	err := DoTeardown()
+	if err != nil {
+		fmt.Println(err)
+		return 1
+	}
+	log.Println("---Finished teardown task")
+	return 0
+}
+
+func taskLoadtest() (status int) {
+	log.Println("---Starting test task")
+	// todo
+	log.Println("---Finished test task")
+	return 0
+}
+
+func runTasks() (status int) {
+	status = 0
+	doAll := *operation == "full"
+	if doAll || *operation == "setup" {
+		status |= taskSetup()
+	}
+	if doAll || *operation == "test" {
+		status |= taskLoadtest()
+	}
+	if doAll || *operation == "teardown" {
+		status |= taskTeardown()
+	}
+	return status
+}
+
+func serveFunc(w http.ResponseWriter, r *http.Request) {
+	decoder := json.NewDecoder(r.Body)
+	var params argsModel
+	if err := decoder.Decode(&params); err != nil {
+		log.Printf("Failed to decode params: %v\n", err)
+		w.Write([]byte("Error: " + err.Error()))
+		w.WriteHeader(http.StatusBadRequest)
+		return
+	} else {
+		params.Apply()
+		if params.Tenant == "" {
+			// fresh tenant every time unless specified
+			*tenant = strings.Replace(strings.ToLower(fake.Company()), " ", "-", -1)
+			fmt.Println("Updating tenant name to: " + *tenant)
+		}
+		preRun()
+
+		// validation
+		if *operation == "teardown" && *tenant == "" {
+			log.Printf("must specify tenant name for teardown")
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		if !ensureCliDownloaded() {
+			log.Printf("error getting cli")
+			w.Write([]byte("error getting cli"))
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+	}
+	status := runTasks()
+	if status == 1 {
+		w.WriteHeader(http.StatusInternalServerError)
+	} else {
+		w.WriteHeader(http.StatusOK)
+	}
+}
+
+func ensureCliDownloaded() bool {
 	fmt.Println("checking for vault cli")
 
 	if runtime.GOOS == "windows" {
@@ -106,7 +198,7 @@ func ensureCliDownloaded() {
 			_, err := exec.LookPath(binaryName)
 			if err == nil {
 				fmt.Println("cli version not specified and found cli in path")
-				return
+				return false
 			} else {
 				fmt.Println("cli not found in path")
 			}
@@ -122,7 +214,7 @@ func ensureCliDownloaded() {
 		out, err := os.Create(execPath)
 		if err != nil {
 			fmt.Printf("error creating file for cli: %v", err)
-			os.Exit(1)
+			return false
 		}
 		defer out.Close()
 		var execSuffix, bitness, osName string
@@ -142,18 +234,18 @@ func ensureCliDownloaded() {
 		resp, err := http.Get(cliUrl)
 		if err != nil {
 			fmt.Printf("failed to fetch cli at %s. Error: \n%v\n", cliUrl, err)
-			os.Exit(1)
+			return false
 		}
 		defer resp.Body.Close()
 		_, err = io.Copy(out, resp.Body)
 		if err != nil {
 			fmt.Printf("failed to create cli file: %v", err)
-			os.Exit(1)
+			return false
 		}
 		err = os.Chmod("thy", 0777)
 		if err != nil {
 			fmt.Printf("failed to set cli permissions to 0777: %v", err)
-			os.Exit(1)
+			return false
 		}
 	}
 	// if here we should use cli in working directory
@@ -161,5 +253,53 @@ func ensureCliDownloaded() {
 		binaryName = ".\\" + binaryName
 	} else {
 		binaryName = "./" + binaryName
+	}
+	return true
+}
+
+type argsModel struct {
+	Tenant            string
+	AdminEndpoint     string
+	AdminUser         string
+	AdminPassword     string
+	Domain            string
+	Operation         string
+	NumberUsers       int
+	NumberSecrets     int
+	NumberPermissions int
+	SecretLength      int
+	CliVersion        string
+}
+
+func (a *argsModel) Apply() {
+	if a.Tenant != "" {
+		*tenant = a.Tenant
+	}
+	if a.AdminEndpoint != "" {
+		*adminEndpoint = a.AdminEndpoint
+	}
+	if a.AdminPassword != "" {
+		*adminEndpoint = a.AdminPassword
+	}
+	if a.Domain != "" {
+		*domain = a.Domain
+	}
+	if a.Operation != "" {
+		*operation = a.Operation
+	}
+	if a.NumberUsers > 0 {
+		*numberUsers = a.NumberUsers
+	}
+	if a.NumberSecrets > 0 {
+		*numberSecrets = a.NumberSecrets
+	}
+	if a.NumberPermissions > 0 {
+		*numberPermissions = a.NumberPermissions
+	}
+	if a.SecretLength > 0 {
+		*secretLength = a.SecretLength
+	}
+	if a.CliVersion != "" {
+		*cliVersion = a.CliVersion
 	}
 }

@@ -5,6 +5,15 @@ type Command interface {
 	GetType() string
 }
 
+type BaseCommand struct {
+	Args []string
+}
+
+func (c *BaseCommand) GetType() string { return "base" }
+func (c *BaseCommand) GetArgs() []string {
+	return c.Args
+}
+
 type ConfigCommand struct {
 	Path string
 	Val  string
