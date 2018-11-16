@@ -5,20 +5,29 @@
     "version": "0.2.0",
     "configurations": [
         {
-            "name": "Cli-Small",
+            "name": "api-setup-small",
             "type": "go",
             "request": "launch",
             "mode": "auto",
-            "program": "${workspaceRoot}/setup",
+            "program": "${workspaceRoot}/api",
             "env": {},
             "args": ["--operation","setup","--users","10", "--secrets", "10", "--permissions", "2"] //, "-cli-version", "0.1.1"]
         },
         {
-            "name": "Serve",
+            "name": "api-serve",
             "type": "go",
             "request": "launch",
             "mode": "auto",
-            "program": "${workspaceRoot}/setup",
+            "program": "${workspaceRoot}/api",
+            "env": {},
+            "args": ["--serve"] //, "-cli-version", "0.1.1"]
+        },
+        {
+            "name": "vegeta-serve",
+            "type": "go",
+            "request": "launch",
+            "mode": "auto",
+            "program": "${workspaceRoot}/vegeta",
             "env": {},
             "args": ["--serve"] //, "-cli-version", "0.1.1"]
         }

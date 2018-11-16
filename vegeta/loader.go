@@ -1,43 +1,39 @@
-/*
-Copyright 2015 The Kubernetes Authors.
-
-Licensed under the Apache License, Version 2.0 (the "License");
-you may not use this file except in compliance with the License.
-You may obtain a copy of the License at
-
-    http://www.apache.org/licenses/LICENSE-2.0
-
-Unless required by applicable law or agreed to in writing, software
-distributed under the License is distributed on an "AS IS" BASIS,
-WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-See the License for the specific language governing permissions and
-limitations under the License.
-*/
-
+// TODO : make this concurrency safe when run in serve mode; spin a context off of the global flags
 package main
 
 import (
-	"flag"
+	"bufio"
+	"encoding/json"
+	"errors"
 	"fmt"
-	"net"
+	"io"
+	"log"
 	"net/http"
 	"os"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/NebulousLabs/fastrand"
+	flag "github.com/spf13/pflag"
+
 	vegeta "github.com/tsenart/vegeta/lib"
 )
 
 var (
-	host     = flag.String("host", "", "The host to load test")
-	useIP    = flag.Bool("use-ip", false, "Use IP for host")
-	port     = flag.Int("port", 80, "The port to load test")
-	paths    = flag.String("paths", "/", "A comma separated list of URL paths to load test")
-	rate     = flag.Int("rate", 0, "The QPS to send")
-	duration = flag.Duration("duration", 10*time.Second, "The duration of the load test")
-	addr     = flag.String("address", "localhost:8080", "The address to serve on")
-	workers  = flag.Int("workers", 10, "The number of workers to use")
+	serve             = flag.Bool("serve", false, "Specifies if the app should run in server mode")
+	port              = flag.Int("port", 3000, "Port to run on if --serve flag specified")
+	reportPort        = flag.Int("report-port", 3001, "Port to run reporting on if --serve NOT specified")
+	tenant            = flag.String("tenant", "", "Tenant name to create")
+	domain            = flag.String("domain", "qabambe.com", "Tenant domain. Default is qabambe.com")
+	secretPaths       []string
+	secretPathsString = flag.String("secret-paths", "", "A comma separated list of secret paths to test")
+	tokens            []string
+	tokensString      = flag.String("tokens", "", "A comma separated list of valid auth tokens")
+	rate              = flag.Int("rate", 1, "The QPS to send")
+	duration          = flag.Duration("duration", 10*time.Second, "The duration of the load test")
+	workers           = flag.Int("workers", 10, "The number of workers to use")
+	staticTargeter    = flag.Bool("static-targeter", false, "Use static targeter rather than dynamic targeter")
 )
 
 // HTTPReporter outputs metrics over HTTP
@@ -70,59 +66,215 @@ func (h *HTTPReporter) SetMetrics(metrics *vegeta.Metrics) {
 
 func main() {
 	flag.Parse()
+	validateCmd()
 
-	if *useIP {
-		var serviceIP string
-		ips, err := net.LookupIP(*host)
-		if err != nil {
-			fmt.Printf("Error looking up %s: %v\n", *host, err)
-			os.Exit(2)
-		}
-		for _, ip := range ips {
-			ipv4 := ip.To4()
-			if ipv4 != nil {
-				serviceIP = ipv4.String()
-				break
-			}
-		}
-		if len(serviceIP) == 0 {
-			fmt.Printf("Failed to find suitable IP address: %v", ips)
-			os.Exit(2)
-		}
-		host = &serviceIP
+	if *serve {
+		http.HandleFunc("/command", serveFunc)
+		log.Fatal(http.ListenAndServe(fmt.Sprintf(":%d", *port), nil))
+	} else {
+		reporter := &HTTPReporter{}
+		go func() {
+			log.Println()
+			log.Fatal(http.ListenAndServe(fmt.Sprintf(":%d", *reportPort), reporter))
+		}()
+		metrics := doAttack()
+		reporter.SetMetrics(metrics)
+		log.Println("press any key to stop serving results and quit")
+		reader := bufio.NewReader(os.Stdin)
+		reader.ReadString('\n')
 	}
+}
 
-	if *port != 80 {
-		*host = fmt.Sprintf("%s:%d", *host, *port)
-	}
+func doAttack() *vegeta.Metrics {
+	fmt.Println("preparing targeting")
+	requestBase := fmt.Sprintf("https://%s.%s/secrets", *tenant, *domain)
 	var targets []vegeta.Target
-	for _, path := range strings.Split(*paths, ",") {
-		path = strings.TrimPrefix(path, "/")
-		targets = append(targets, vegeta.Target{
-			Method: "GET",
-			URL:    fmt.Sprintf("https://%s/%s", *host, path),
-		})
-		fmt.Printf(fmt.Sprintf("adding target: https://%s/%s\n", *host, path))
+	if len(secretPaths) < 1 {
+		secretPaths = strings.Split(*secretPathsString, ",")
 	}
-	targeter := vegeta.NewStaticTargeter(targets...)
+
+	// TODO : test perf between static and json attacker
+	// tradeoff is that if we use static, we have to pre-select auth-path pairs
+	// but with JSON targeter, we can use a generator for a new random pair each time
+	var targeter vegeta.Targeter
+	if !*staticTargeter {
+		targetReader := NewTargetReader(requestBase, secretPaths, tokens)
+		targeter = vegeta.NewJSONTargeter(targetReader, nil, nil)
+	} else {
+		for _, path := range secretPaths {
+			path = strings.TrimPrefix(path, "/")
+			targets = append(targets, vegeta.Target{
+				Method: "GET",
+				URL:    fmt.Sprintf("%s/%s", requestBase, path),
+			})
+			//fmt.Printf(fmt.Sprintf("adding target:%s/%s\n", requestBase, path))
+		}
+		targeter = vegeta.NewStaticTargeter(targets...)
+	}
+
+	log.Println("starting attack session")
 	attacker := vegeta.NewAttacker(vegeta.Workers(uint64(*workers)))
 	attackRate := vegeta.Rate{
 		Freq: *rate,
 		Per:  time.Second,
 	}
-
-	reporter := &HTTPReporter{}
-	go http.ListenAndServe(*addr, reporter)
-	for {
-		metrics := &vegeta.Metrics{}
-		for res := range attacker.Attack(targeter, attackRate, *duration, "main") {
-			metrics.Add(res)
-			if res.Error != "" {
-				fmt.Println(res.Error)
-			}
+	metrics := &vegeta.Metrics{}
+	for res := range attacker.Attack(targeter, attackRate, *duration, "main") {
+		metrics.Add(res)
+		if res.Error != "" {
+			fmt.Println(res.Error)
 		}
-		fmt.Println("completed attack session")
-		metrics.Close()
-		reporter.SetMetrics(metrics)
+	}
+	log.Println("completed attack session")
+	metrics.Close()
+	return metrics
+}
+
+func serveFunc(w http.ResponseWriter, r *http.Request) {
+	decoder := json.NewDecoder(r.Body)
+	var params argsModel
+	err := decoder.Decode(&params)
+	secretPaths = params.SecretPaths
+	tokens = params.Tokens
+	if err == nil || err == io.EOF {
+		err = params.Validate()
+	}
+	if err != nil {
+		log.Printf("Error assembling required prameters: %s\n", err.Error())
+		w.WriteHeader(http.StatusBadRequest)
+		w.Write([]byte("Error: " + err.Error()))
+		return
+	}
+	params.Apply()
+	metrics := doAttack()
+	if asBytes, err := json.Marshal(metrics); err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		w.Write([]byte("error marshalling metrics for response: " + err.Error()))
+	} else {
+		w.WriteHeader(http.StatusOK)
+		w.Write(asBytes)
+	}
+}
+
+type targetGenerator struct {
+	root      string
+	paths     []string
+	pathsLen  int
+	tokens    []string
+	tokensLen int
+	data      []byte
+	readIndex int64
+}
+
+func NewTargetReader(root string, paths []string, tokens []string) io.Reader {
+	return &targetGenerator{
+		root:      root,
+		paths:     paths,
+		pathsLen:  len(paths),
+		tokens:    tokens,
+		tokensLen: len(tokens),
+	}
+}
+
+func (t *targetGenerator) zeroReadIndex() {
+	if t.readIndex <= 0 {
+		return
+	}
+	t.data = t.data[t.readIndex:]
+	t.readIndex = 0
+}
+
+func (t *targetGenerator) pushTargetBuffer() {
+	t.zeroReadIndex()
+	path := strings.TrimPrefix(t.paths[fastrand.Intn(t.pathsLen)], "/")
+	header := http.Header{}
+	token := t.tokens[fastrand.Intn(t.tokensLen)]
+	header.Add("Authorization", token)
+	fmt.Printf("generated target of %s and header %s...\n", path, token[:10])
+	target := vegeta.Target{
+		Method: "GET",
+		URL:    fmt.Sprintf("%s/%s", t.root, path),
+		Header: header,
+	}
+	m, _ := json.Marshal(target)
+	m = append(m, '\n')
+	t.data = append(t.data, m...)
+}
+
+// Read reads forever since it is a generator; no EOF needed
+// the JsonTargeter looks for '\n' as an object delimiter
+func (t *targetGenerator) Read(p []byte) (n int, err error) {
+	lenOut := len(p)
+	lenOut64 := int64(lenOut)
+	for lenOut64 > int64(len(t.data))-t.readIndex {
+		t.pushTargetBuffer()
+	}
+	copy(p, t.data[t.readIndex:])
+	t.readIndex += lenOut64
+	return lenOut, nil
+}
+
+type argsModel struct {
+	Tenant         string
+	Domain         string
+	Rate           int
+	Duration       int
+	SecretPaths    []string
+	Tokens         []string
+	StaticTargeter bool
+	Workers        int
+}
+
+func validateCmd() {
+	if *serve {
+		return
+	}
+	missing := ""
+	if *tenant == "" {
+		missing = "--tenant"
+	} else if *secretPathsString == "" {
+		missing = "--secret-paths"
+	} else if *tokensString == "" {
+		missing = "--tokens"
+	}
+
+	if missing != "" {
+		fmt.Printf("error: missing required flag: '%s'\n", missing)
+		flag.Usage()
+		os.Exit(1)
+	}
+}
+
+func (a *argsModel) Validate() error {
+	if a.Tenant == "" {
+		return errors.New("must specify tenant")
+	}
+	if len(a.SecretPaths) == 0 {
+		return errors.New("no secret paths specified")
+	}
+	if len(a.Tokens) == 0 {
+		return errors.New("no auth tokens specified")
+	}
+	return nil
+}
+
+func (a *argsModel) Apply() {
+	if a.Tenant != "" {
+		*tenant = a.Tenant
+	}
+	if a.Domain != "" {
+		*domain = a.Domain
+	}
+	if a.Duration > 0 {
+		*duration = time.Duration(a.Duration) * time.Second
+	}
+	if a.Rate > 0 {
+		*rate = a.Rate
+	}
+	if a.Workers > 0 {
+		*workers = a.Workers
+	}
+	if a.StaticTargeter {
+		*staticTargeter = a.StaticTargeter
 	}
 }
