@@ -191,7 +191,7 @@ func addNodeToTree(root, node *Node) {
 	currNode.Children = append(currNode.Children, node)
 }
 
-func prepareDataLocally() {
+func prepareDataLocally() (tenant string) {
 	allCommands = SyncCommandSet{}
 
 	// need to clear auth from last call
@@ -269,6 +269,8 @@ func prepareDataLocally() {
 		}
 	}
 	allCommands = append(allCommands, permissionCreateCommands)
+
+	return tenant
 }
 
 func createRemoteTenant() error {

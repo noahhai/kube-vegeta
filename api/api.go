@@ -113,23 +113,29 @@ func validateCmd(ignoreServe bool) error {
 	return nil
 }
 
-func taskSetup() error {
+func respFromError(err error) (status int, resp []byte) {
+	m, _ := json.Marshal(err)
+	return 1, m
+}
+
+func taskSetup() (status int, resp []byte) {
 	log.Println("---Starting setup task")
 	err := createRemoteTenant()
 	if err != nil {
 		fmt.Println("failed to create tenant")
-		return err
+		return respFromError(err)
 	}
 
-	prepareDataLocally()
+	tenant := prepareDataLocally()
 
 	err = populateRemoteTenant()
 	if err != nil {
 		fmt.Println(err)
-		return err
+		return respFromError(err)
 	}
 	log.Println("---Finished setup task")
-	return nil
+	resp, _ = json.Marshal(map[string]string{"tenant": tenant})
+	return 0, resp
 }
 
 func taskTeardown() error {
@@ -148,10 +154,7 @@ func runTasks() (status int, resp []byte) {
 	resp = []byte{}
 	doAll := *operation == "full"
 	if doAll || *operation == "setup" {
-		if err := taskSetup(); err != nil {
-			status = 1
-			resp = []byte(err.Error())
-		}
+		status, resp = taskSetup()
 	}
 	if status == 0 && (doAll || *operation == "test") {
 		s, r := taskLoadtest()
@@ -297,14 +300,15 @@ func ensureCliDownloaded() error {
 		if err != nil {
 			return logAndError(fmt.Sprintf("failed to set cli permissions to 0777: %v", err))
 		}
-
-		// if here we should use cli in working directory
-		if runtime.GOOS == "windows" {
-			binaryName = ".\\" + binaryName
-		} else {
-			binaryName = "./" + binaryName
-		}
 	}
+
+	// if here we should use cli in working directory
+	if runtime.GOOS == "windows" {
+		binaryName = ".\\" + binaryName
+	} else {
+		binaryName = "./" + binaryName
+	}
+
 	return nil
 }
 
