@@ -15,6 +15,7 @@ spec:
         - /api
         - --serve
         - --port=8080
+        - --selector=run=vegeta
         ports:
         - containerPort: 8080
         resources:

@@ -184,13 +184,15 @@ func (t *targetGenerator) zeroReadIndex() {
 	t.readIndex = 0
 }
 
+// TODO : can we optimize this? each target is around 600 bytes and
+// the attacker reads 4000 at a time...so need about 10 targets per invocation
 func (t *targetGenerator) pushTargetBuffer() {
 	t.zeroReadIndex()
 	path := strings.TrimPrefix(t.paths[fastrand.Intn(t.pathsLen)], "/")
 	header := http.Header{}
 	token := t.tokens[fastrand.Intn(t.tokensLen)]
 	header.Add("Authorization", token)
-	fmt.Printf("generated target of %s and header %s...\n", path, token[:10])
+	// fmt.Printf("generated target of %s and header %s...\n", path, token[:10])
 	target := vegeta.Target{
 		Method: "GET",
 		URL:    fmt.Sprintf("%s/%s", t.root, path),

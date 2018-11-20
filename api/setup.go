@@ -18,7 +18,7 @@ import (
 	"github.com/icrowley/fake"
 )
 
-func HandleCommands(cmdPipe <-chan Command, errPipe chan<- interface{}, resultPipe chan<- CmdResult, wg *sync.WaitGroup) {
+func HandleCommands(cmdPipe <-chan Command, errPipe chan<- error, resultPipe chan<- CmdResult, wg *sync.WaitGroup) {
 
 	for {
 		c, ok := <-cmdPipe
@@ -33,7 +33,7 @@ func HandleCommands(cmdPipe <-chan Command, errPipe chan<- interface{}, resultPi
 		output, err := cmd.CombinedOutput()
 
 		if err != nil {
-			errFull := fmt.Errorf("err executing cmd: thy %s\nErr: \n%s\nOutput:\n %s", strings.Join(cmdArgs, " "), err, string(output))
+			errFull := fmt.Errorf("err executing cmd: %s %s\nErr: \n%s\nOutput:\n %s", binaryName, strings.Join(cmdArgs, " "), err, string(output))
 			fmt.Println(errFull)
 			errPipe <- errFull
 			return
@@ -70,10 +70,10 @@ func resultFromCmd(t, cmd string) CmdResult {
 }
 
 func populateRemoteTenant() error {
-	numWorkers := runtime.NumCPU() - 1
+	numWorkers := runtime.NumCPU()
 	cmdPipe := make(chan Command, *numberUsers+*numberSecrets)
 	defer close(cmdPipe)
-	errPipe := make(chan interface{}, numWorkers)
+	errPipe := make(chan error, numWorkers)
 	finishPipe := make(chan bool)
 	defer close(finishPipe)
 	resultPipe := make(chan CmdResult)
@@ -92,10 +92,8 @@ func populateRemoteTenant() error {
 	errored := false
 	// TODO : optimize permisison creation by building config json locally and updating all at once
 	for i, syncSetMember := range allCommands {
-
-		fmt.Printf("Beginning stage %d; %d operations\n", i, len(syncSetMember))
+		fmt.Printf("running with %d procs\n", runtime.NumCPU())
 		wg.Add(len(syncSetMember))
-
 		go func() {
 			wg.Wait()
 			finishPipe <- true
@@ -117,7 +115,7 @@ func populateRemoteTenant() error {
 			errored = true
 			fmt.Println("")
 			fmt.Printf("Op cancelled at stage %d due to error\n: %v", i, e)
-			break
+			return e
 		}
 	}
 	if !errored {
@@ -295,7 +293,7 @@ func createRemoteTenant() error {
 
 	resp, err := http.Post(url, "application/json", bytes.NewBuffer(asBytes))
 	if err != nil {
-		fmt.Println("failed to post to tenant create endpoint")
+		fmt.Println("failed to post to tenant create endpoint: " + err.Error())
 		return err
 	}
 	if resp.StatusCode < 200 || resp.StatusCode > 300 {

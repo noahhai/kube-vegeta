@@ -10,14 +10,14 @@ spec:
     spec:
       containers:
       - name: vegeta
-        image: gcr.io/google_containers/loader:0.3
+        image: 661058921700.dkr.ecr.us-east-1.amazonaws.com/vegeta-loader:latest
         resources:
           requests:
             cpu: 100m
         command:
           - /loader
           - --serve
-          - --port=:8080
+          - --port=8080
           - --rate=1
           - --duration=10s
           # TODO - one worker?

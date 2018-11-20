@@ -10,4 +10,4 @@ default:
   http: https
   store:
     type: file
-  tenant: thoughtsphere
+  tenant: brightdog
