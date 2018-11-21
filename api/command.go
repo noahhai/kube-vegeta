@@ -1,5 +1,7 @@
 package main
 
+import "encoding/json"
+
 type Command interface {
 	GetArgs() []string
 	GetType() string
@@ -46,6 +48,21 @@ func (c *UserCreateCommand) GetArgs() []string {
 	}
 }
 
+type TokenCreateCommand struct {
+	User string
+}
+
+func (c *TokenCreateCommand) GetType() string { return "token" }
+func (c *TokenCreateCommand) GetArgs() []string {
+	return []string{
+		"auth",
+		"-u",
+		c.User,
+		"-p",
+		c.User + "@1",
+	}
+}
+
 type SecretCreateCommand struct {
 	Path string
 	Data string
@@ -86,8 +103,27 @@ func (c *PermissionCreateCommand) GetArgs() []string {
 }
 
 type CmdResult struct {
-	Type   string
-	Fields map[string]string
+	Type  string
+	Value string
+}
+
+type TokenResult struct {
+	AccessToken  string
+	ExpiresIn    int
+	Granted      string
+	RefreshToken string
+	TokenType    string
+}
+
+func GetTokenResult(output []byte) *CmdResult {
+	var tr TokenResult
+	if err := json.Unmarshal(output, &tr); err == nil {
+		return &CmdResult{
+			Type:  "token",
+			Value: tr.AccessToken,
+		}
+	}
+	return nil
 }
 
 type AsyncCommandSet []Command

@@ -87,7 +87,7 @@ func main() {
 
 func doAttack() *vegeta.Metrics {
 	fmt.Println("preparing targeting")
-	requestBase := fmt.Sprintf("https://%s.%s/secrets", *tenant, *domain)
+	requestBase := fmt.Sprintf("https://%s.%s/", *tenant, *domain)
 	var targets []vegeta.Target
 	if len(secretPaths) < 1 {
 		secretPaths = strings.Split(*secretPathsString, ",")
@@ -130,26 +130,32 @@ func doAttack() *vegeta.Metrics {
 	return metrics
 }
 
+func logAndReturnFail(w http.ResponseWriter, msg string, status int) {
+	log.Println(msg)
+	w.WriteHeader(status)
+	w.Write([]byte(msg))
+
+}
+
 func serveFunc(w http.ResponseWriter, r *http.Request) {
 	decoder := json.NewDecoder(r.Body)
 	var params argsModel
 	err := decoder.Decode(&params)
+	fmt.Printf("received request: %v\n", params)
 	secretPaths = params.SecretPaths
 	tokens = params.Tokens
 	if err == nil || err == io.EOF {
 		err = params.Validate()
 	}
 	if err != nil {
-		log.Printf("Error assembling required prameters: %s\n", err.Error())
-		w.WriteHeader(http.StatusBadRequest)
-		w.Write([]byte("Error: " + err.Error()))
+		logAndReturnFail(w, "Error assembling required prameters: "+err.Error(), http.StatusBadRequest)
 		return
 	}
 	params.Apply()
 	metrics := doAttack()
 	if asBytes, err := json.Marshal(metrics); err != nil {
-		w.WriteHeader(http.StatusInternalServerError)
-		w.Write([]byte("error marshalling metrics for response: " + err.Error()))
+		logAndReturnFail(w, "error marshalling metrics for response: "+err.Error(), http.StatusInternalServerError)
+		return
 	} else {
 		w.WriteHeader(http.StatusOK)
 		w.Write(asBytes)

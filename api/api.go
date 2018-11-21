@@ -52,6 +52,7 @@ func main() {
 	if *serve {
 		http.HandleFunc("/command", serveFunc)
 		log.Fatal(http.ListenAndServe(fmt.Sprintf(":%d", *port), nil))
+		return
 	}
 
 	if err := ensureCliDownloaded(); err != nil {
@@ -103,6 +104,9 @@ func validateCmd(ignoreServe bool) error {
 	} else if *operation == "teardown" && *tenant == "" {
 		errMsg = "error: must specify tenant"
 	}
+	if *loadDuration > 3000 {
+		errMsg = "error: --load-duration has max of 3000 seconds"
+	}
 	if errMsg != "" {
 		if *serve {
 			return failOnServer(errMsg)
@@ -113,29 +117,41 @@ func validateCmd(ignoreServe bool) error {
 	return nil
 }
 
-func respFromError(err error) (status int, resp []byte) {
+func respFromError(err error) (status int, resp []byte, model *postLoaderModel) {
 	m, _ := json.Marshal(err)
-	return 1, m
+	return 1, m, nil
 }
 
-func taskSetup() (status int, resp []byte) {
+func taskSetup() (status int, resp []byte, testModel *postLoaderModel) {
 	log.Println("---Starting setup task")
 	err := createRemoteTenant()
 	if err != nil {
 		fmt.Println("failed to create tenant")
 		return respFromError(err)
 	}
+	model := &postLoaderModel{
+		Tenant:   *tenant,
+		Domain:   *domain,
+		Rate:     *loadRate,
+		Duration: *loadDuration,
+		// TODO : number workers
+	}
 
-	tenant := prepareDataLocally()
+	secretPaths := prepareDataLocally()
+	model.SecretPaths = secretPaths
 
-	err = populateRemoteTenant()
+	tokens, err := populateRemoteTenant()
 	if err != nil {
 		fmt.Println(err)
 		return respFromError(err)
 	}
+	if len(tokens) > 0 {
+		model.Tokens = tokens
+	}
+
 	log.Println("---Finished setup task")
-	resp, _ = json.Marshal(map[string]string{"tenant": tenant})
-	return 0, resp
+	resp, _ = json.Marshal(map[string]string{"tenant": *tenant})
+	return 0, resp, model
 }
 
 func taskTeardown() error {
@@ -152,12 +168,20 @@ func taskTeardown() error {
 func runTasks() (status int, resp []byte) {
 	status = 0
 	resp = []byte{}
+	var testModel *postLoaderModel
 	doAll := *operation == "full"
 	if doAll || *operation == "setup" {
-		status, resp = taskSetup()
+		status, resp, testModel = taskSetup()
+		saveTestModel(testModel.Tenant, testModel)
 	}
 	if status == 0 && (doAll || *operation == "test") {
-		s, r := taskLoadtest()
+		if testModel == nil {
+			testModel = getTestModel(*tenant)
+		}
+		if testModel == nil {
+			return 1, []byte("failed to load test model for tenant: " + *tenant)
+		}
+		s, r := taskLoadtest(testModel)
 		status |= s
 		resp = r
 	}
@@ -170,6 +194,14 @@ func runTasks() (status int, resp []byte) {
 	return status, resp
 }
 
+// TODO : implement these and we can run "test" as standalone command
+func saveTestModel(tenant string, model *postLoaderModel) {
+
+}
+func getTestModel(tenant string) *postLoaderModel {
+	return nil
+}
+
 func serveFunc(w http.ResponseWriter, r *http.Request) {
 	decoder := json.NewDecoder(r.Body)
 	var params argsModel
@@ -180,32 +212,34 @@ func serveFunc(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusBadRequest)
 		w.Write([]byte("Error: " + err.Error()))
 		return
-	} else {
-		params.Apply()
-		if err := validateCmd(false); err != nil {
-			w.WriteHeader(http.StatusBadRequest)
-			w.Write([]byte("Error: " + err.Error()))
-			return
-		}
-		if params.Tenant == "" {
-			// fresh tenant every time unless specified
-			*tenant = strings.Replace(strings.ToLower(fake.Company()), " ", "-", -1)
-			fmt.Println("Updating tenant name to: " + *tenant)
-		}
-		preRun()
-
-		// validation
-		if *operation == "teardown" && *tenant == "" {
-			log.Printf("must specify tenant name for teardown")
-			w.WriteHeader(http.StatusBadRequest)
-			return
-		}
-		if err := ensureCliDownloaded(); err != nil {
-			w.Write([]byte(err.Error()))
-			w.WriteHeader(http.StatusBadRequest)
-			return
-		}
 	}
+
+	params.Apply()
+	if err := validateCmd(false); err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		w.Write([]byte("Error: " + err.Error()))
+		return
+	}
+	if params.Tenant == "" {
+		// fresh tenant every time unless specified
+		*tenant = strings.Replace(strings.ToLower(fake.Company()), " ", "-", -1)
+		fmt.Println("Updating tenant name to: " + *tenant)
+	}
+	preRun()
+
+	// validation
+	if *operation == "teardown" && *tenant == "" {
+		log.Printf("must specify tenant name for teardown")
+		w.WriteHeader(http.StatusBadRequest)
+		return
+	}
+	if err := ensureCliDownloaded(); err != nil {
+		w.Write([]byte(err.Error()))
+		w.WriteHeader(http.StatusBadRequest)
+		return
+	}
+
+	fmt.Println("operation: " + *operation)
 	status, resp := runTasks()
 	if len(resp) > 0 {
 		w.Write(resp)

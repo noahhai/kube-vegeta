@@ -9,16 +9,14 @@ import (
 	"math/rand"
 	"net/http"
 	"os/exec"
-	"regexp"
 	"runtime"
 	"strings"
 	"sync"
 
-	"github.com/gobuffalo/uuid"
 	"github.com/icrowley/fake"
 )
 
-func HandleCommands(cmdPipe <-chan Command, errPipe chan<- error, resultPipe chan<- CmdResult, wg *sync.WaitGroup) {
+func HandleCommands(cmdPipe <-chan Command, errPipe chan<- error, resultPipe chan<- *CmdResult, wg *sync.WaitGroup) {
 
 	for {
 		c, ok := <-cmdPipe
@@ -39,51 +37,46 @@ func HandleCommands(cmdPipe <-chan Command, errPipe chan<- error, resultPipe cha
 			return
 		} else {
 			fmt.Printf(" " + strings.ToLower(c.GetType())[:1])
-			// TODO : if we need output for future actions
-			// _ = output
-			//resultPipe <- resultFromCmd(c.ResourceType, c.C)
+			if c.GetType() == "token" {
+				resultPipe <- GetTokenResult(output)
+			}
 		}
 		wg.Done()
 	}
 }
 
-func fieldFromCmd(cmd, field string) string {
-	r := regexp.MustCompile(field + `\s+(\S+)`)
-	res := r.FindStringSubmatch(cmd)
-	if len(res) > 0 {
-		return res[0]
-	}
-	return ""
-}
-
-func resultFromCmd(t, cmd string) CmdResult {
-	if t == "user" {
-		res := CmdResult{
-			Type:   t,
-			Fields: map[string]string{},
-		}
-		res.Fields["name"] = fieldFromCmd(cmd, "name")
-		res.Fields["pass"] = fieldFromCmd(cmd, "pass")
-		return res
-	}
-	return CmdResult{}
-}
-
-func populateRemoteTenant() error {
+func populateRemoteTenant() (tokens []string, err error) {
 	numWorkers := runtime.NumCPU()
 	cmdPipe := make(chan Command, *numberUsers+*numberSecrets)
 	defer close(cmdPipe)
 	errPipe := make(chan error, numWorkers)
 	finishPipe := make(chan bool)
 	defer close(finishPipe)
-	resultPipe := make(chan CmdResult)
-	defer close(resultPipe)
+	resultPipe := make(chan *CmdResult, *numberUsers)
 
-	var wg sync.WaitGroup
+	var cmdWait sync.WaitGroup
+
+	var tokenWait sync.WaitGroup
+	tokenWait.Add(*numberUsers)
+
+	tokens = make([]string, 0, *numberUsers)
+	// spawn token collector
+	go func() {
+		for result := range resultPipe {
+			if result.Type != "token" {
+				fmt.Printf("Warning: unhandled result type of type: %s, value: %s\n", result.Type, result.Value)
+			} else {
+				tokens = append(tokens, result.Value)
+				tokenWait.Done()
+			}
+		}
+	}()
+
+	// spawn command worrkers
 	fmt.Printf("Creating %d workers for setup\n", numWorkers)
 	for i := 0; i < numWorkers; i++ {
 		go func() {
-			HandleCommands(cmdPipe, errPipe, resultPipe, &wg)
+			HandleCommands(cmdPipe, errPipe, resultPipe, &cmdWait)
 		}()
 	}
 
@@ -93,11 +86,14 @@ func populateRemoteTenant() error {
 	// TODO : optimize permisison creation by building config json locally and updating all at once
 	for i, syncSetMember := range allCommands {
 		fmt.Printf("running with %d procs\n", runtime.NumCPU())
-		wg.Add(len(syncSetMember))
+		cmdWait.Add(len(syncSetMember))
+
 		go func() {
-			wg.Wait()
+			// wait for all commands to execute
+			cmdWait.Wait()
 			finishPipe <- true
 		}()
+		// enqueue all commands
 		go func() {
 			for _, asyncCommand := range syncSetMember {
 				if errored {
@@ -115,14 +111,21 @@ func populateRemoteTenant() error {
 			errored = true
 			fmt.Println("")
 			fmt.Printf("Op cancelled at stage %d due to error\n: %v", i, e)
-			return e
+			close(resultPipe)
+			return nil, e
 		}
 	}
+	// signal last of tokens has been sent back and await aggregator to finish aggregating them
+	fmt.Println("done with queuing all commands")
+	close(resultPipe)
+	tokenWait.Wait()
+
 	if !errored {
 		fmt.Println("Finished setup")
 	}
 
-	return nil
+	// return tokens so they can be used to auth with many users for a more-realistic load test
+	return tokens, nil
 }
 
 func addConfigArg(args []string) []string {
@@ -191,7 +194,7 @@ func addNodeToTree(root, node *Node) {
 	currNode.Children = append(currNode.Children, node)
 }
 
-func prepareDataLocally() (tenant string) {
+func prepareDataLocally() (secretPaths []string) {
 	allCommands = SyncCommandSet{}
 
 	// need to clear auth from last call
@@ -234,19 +237,23 @@ func prepareDataLocally() (tenant string) {
 	for i := 0; i < *numberUsers; i++ {
 		name := fake.EmailAddress()
 		userList = append(userList, name)
-		pass, _ := uuid.NewV4()
+		//pass, _ := uuid.NewV4()
+		pass := name + "@1"
 		userSecretCreateCommands = append(userSecretCreateCommands, &UserCreateCommand{
 			Name: name,
-			Pass: pass.String(),
+			//Pass: pass.String(),
+			Pass: pass,
 		})
 	}
 
+	secretPaths = []string{}
 	secretTreeRoot := buildTreeRoot()
 	for i := 0; i < *numberSecrets; i++ {
 		secretName := fake.IPv4()
 		secretNode := NewNode(secretName, nil)
 		addNodeToTree(secretTreeRoot, secretNode)
 		secretPath := getNodePath(secretNode, "/")
+		secretPaths = append(secretPaths, secretPath)
 
 		data := fake.CharactersN(*secretLength)
 
@@ -270,7 +277,16 @@ func prepareDataLocally() (tenant string) {
 	}
 	allCommands = append(allCommands, permissionCreateCommands)
 
-	return tenant
+	numberTokens := *numberUsers
+	tokenCreateCommands := make(AsyncCommandSet, 0, numberTokens)
+	for _, u := range userList {
+		tokenCreateCommands = append(tokenCreateCommands, &TokenCreateCommand{
+			User: u,
+		})
+	}
+	allCommands = append(allCommands, tokenCreateCommands)
+
+	return secretPaths
 }
 
 func createRemoteTenant() error {
