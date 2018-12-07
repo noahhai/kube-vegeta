@@ -16,7 +16,11 @@ func DoTeardown() error {
 	}
 	url = url + "tenant/" + *tenant
 	fmt.Println("delete request to: " + url)
+
 	req, err := http.NewRequest("DELETE", url, nil)
+	req.Header.Set("Authorization", "Basic NDhkZjg0NzEtYjRiNi00ZWU1LTlkN2MtNGMzYWYxM2ZhZThhOmQxMzFkY2M4LTRkYWEtNDg4MS1iNzgwLTU2ZTZmOWY3ZTE3YQ==")
+	req.Header.Set("Content-Type", "application/json")
+
 	if err != nil {
 		fmt.Println("failed to create delete request")
 		return err

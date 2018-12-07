@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"io/ioutil"
 	"log"
+	"math"
 	"net/http"
 	"sync"
 	"time"
@@ -56,7 +57,12 @@ func taskLoadtest(model *postLoaderModel) (status int, resp []byte) {
 			Data: results,
 		}
 	}
-	resp, _ = json.Marshal(&wrapper)
+	if !*redash {
+		resp, _ = json.Marshal(&wrapper)
+	} else {
+		redashData := vegetaResultsToRedash(results)
+		resp, _ = json.Marshal(redashData)
+	}
 	log.Println("---Finished test task")
 	return status, resp
 }
@@ -91,11 +97,18 @@ func runTest(model *postLoaderModel) ([]vegeta.Metrics, error) {
 		}
 		loadbots = append(loadbots, pod)
 	}
+	numberLoadBots := len(loadbots)
 	parts := []vegeta.Metrics{}
 	lock := sync.Mutex{}
 	wg := sync.WaitGroup{}
-	wg.Add(len(loadbots))
+	wg.Add(numberLoadBots)
+
+	// split rate among available loadbots
 	fmt.Printf("Found %d loadbots for load test\n", len(loadbots))
+	ratePer := int(float64(model.Rate) / math.Max(1.0, float64(numberLoadBots)))
+	fmt.Printf("Spreading total rate %d rps to %d rps per bot\n", model.Rate, ratePer)
+	model.Rate = ratePer
+
 	bodyMarshalled, err := json.Marshal(model)
 	clientTimeout := time.Duration(*loadDuration*6/5) * time.Second
 	if err != nil {
@@ -117,7 +130,7 @@ func runTest(model *postLoaderModel) ([]vegeta.Metrics, error) {
 				client.Timeout = clientTimeout
 				resp, err := client.Do(req)
 				if err != nil {
-					fmt.Printf("Error posting task to loadeer: %v\n", err)
+					fmt.Printf("Error posting task to loader: %v\n", err)
 					if errAny == nil {
 						errAny = err
 					}

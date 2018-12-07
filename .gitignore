@@ -12,3 +12,7 @@
 *.out
 Godeps/_workspace/*
 *.bin
+/vegeta/vegeta
+/api/api
+*results.bin
+*debug

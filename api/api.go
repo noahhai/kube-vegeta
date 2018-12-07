@@ -14,11 +14,12 @@ import (
 	"runtime"
 	"strings"
 
+	"github.com/joncalhoun/qson"
+
 	"github.com/icrowley/fake"
 	flag "github.com/spf13/pflag"
 )
 
-var initialAdmin LocalUser
 var allCommands SyncCommandSet
 var currDir string
 var binaryName string
@@ -27,6 +28,7 @@ var defaultCliVersion = "0.1.1"
 
 var (
 	serve             = flag.Bool("serve", false, "Specifies if the app should run in server mode")
+	redash            = flag.Bool("redash", false, "Specifies if the app should format the data for redash")
 	port              = flag.Int("port", 3000, "Port to run on if --serve flag specified")
 	tenant            = flag.StringP("tenant", "t", "", "Tenant name to create")
 	adminEndpoint     = flag.StringP("admin-endpoint", "a", "https://7h1u0s6a44.execute-api.us-east-1.amazonaws.com/Prod", "Admin Endpoint. Default is QA")
@@ -51,6 +53,7 @@ func main() {
 
 	if *serve {
 		http.HandleFunc("/command", serveFunc)
+		log.Printf("starting to serve on port %d\n", *port)
 		log.Fatal(http.ListenAndServe(fmt.Sprintf(":%d", *port), nil))
 		return
 	}
@@ -60,7 +63,7 @@ func main() {
 	}
 	preRun()
 	status, res := runTasks()
-	if len(res) > 0 {
+	if res != nil && len(res) > 0 {
 		fmt.Println("output:")
 		fmt.Println(string(res))
 	}
@@ -74,7 +77,7 @@ func onStartup() {
 
 func preRun() {
 	// TODO : update this as we change it
-	adminPassword = *adminUser + "@1"
+	adminPassword = *adminUser + "@1" + *adminUser + "@1"
 	*tenant = strings.ToLower(*tenant)
 	if *tenant == "" {
 		*tenant = strings.Replace(strings.ToLower(fake.Company()), " ", "-", -1)
@@ -172,6 +175,9 @@ func runTasks() (status int, resp []byte) {
 	doAll := *operation == "full"
 	if doAll || *operation == "setup" {
 		status, resp, testModel = taskSetup()
+		if status != 0 {
+			return status, resp
+		}
 		saveTestModel(testModel.Tenant, testModel)
 	}
 	if status == 0 && (doAll || *operation == "test") {
@@ -203,9 +209,15 @@ func getTestModel(tenant string) *postLoaderModel {
 }
 
 func serveFunc(w http.ResponseWriter, r *http.Request) {
-	decoder := json.NewDecoder(r.Body)
+	fmt.Println(r.RequestURI)
 	var params argsModel
-	err := decoder.Decode(&params)
+	var err error
+	if r.Method == "POST" {
+		decoder := json.NewDecoder(r.Body)
+		err = decoder.Decode(&params)
+	} else {
+		err = qson.Unmarshal(&params, r.URL.RawQuery)
+	}
 
 	if err != nil && err != io.EOF {
 		log.Printf("Error assembling required prameters: %s\n", err.Error())
@@ -241,7 +253,7 @@ func serveFunc(w http.ResponseWriter, r *http.Request) {
 
 	fmt.Println("operation: " + *operation)
 	status, resp := runTasks()
-	if len(resp) > 0 {
+	if resp != nil && len(resp) > 0 {
 		w.Write(resp)
 	}
 	if status == 1 {
@@ -351,6 +363,7 @@ type argsModel struct {
 	AdminEndpoint     string
 	AdminUser         string
 	AdminPassword     string
+	Redash            *bool
 	Domain            string
 	Operation         string
 	NumberUsers       int
@@ -363,6 +376,11 @@ type argsModel struct {
 }
 
 func (a *argsModel) Apply() {
+	if a.Redash != nil && !*a.Redash {
+		*redash = false
+	} else {
+		*redash = true
+	}
 	if a.Tenant != "" {
 		*tenant = a.Tenant
 	}

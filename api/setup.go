@@ -308,8 +308,17 @@ func createRemoteTenant() error {
 		fmt.Println("failed to marshal create tenant request body")
 		return err
 	}
+	c := &http.Client{}
 
-	resp, err := http.Post(url, "application/json", bytes.NewBuffer(asBytes))
+	//provision tenant
+	req, err := http.NewRequest("POST", url, bytes.NewBuffer(asBytes))
+	if err != nil {
+		fmt.Printf("Failed to create new request: %v\n", err)
+		return err
+	}
+	req.Header.Set("Authorization", "Basic NDhkZjg0NzEtYjRiNi00ZWU1LTlkN2MtNGMzYWYxM2ZhZThhOmQxMzFkY2M4LTRkYWEtNDg4MS1iNzgwLTU2ZTZmOWY3ZTE3YQ==")
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := c.Do(req)
 	if err != nil {
 		fmt.Println("failed to post to tenant create endpoint: " + err.Error())
 		return err
@@ -322,10 +331,47 @@ func createRemoteTenant() error {
 
 	respBody, err := ioutil.ReadAll(resp.Body)
 	if err != nil {
-		fmt.Println("failed to read delete request response")
+		fmt.Println("failed to read create request response")
 		return err
 	} else {
 		fmt.Println("response: ", string(respBody))
 	}
+
+	//provision initial admin
+	body = map[string]interface{}{
+		"username": *adminUser,
+		"password": adminPassword,
+	}
+
+	asBytes, err = json.Marshal(body)
+	if err != nil {
+		fmt.Println("failed to marshal initial admin request body")
+		return err
+	}
+	uri := fmt.Sprintf("https://%s.%s/initialize", *tenant, *domain)
+	req, err = http.NewRequest("POST", uri, bytes.NewBuffer(asBytes))
+	if err != nil {
+		fmt.Printf("Failed to create new request: %v\n", err)
+		return err
+	}
+	resp, err = c.Do(req)
+	if err != nil {
+		fmt.Println("failed to post to initialize endpoint: " + err.Error())
+		return err
+	}
+	if resp.StatusCode < 200 || resp.StatusCode > 300 {
+		fmt.Println("Failed request")
+		return errors.New("Failed to create tenant")
+	}
+	defer resp.Body.Close()
+
+	respBody, err = ioutil.ReadAll(resp.Body)
+	if err != nil {
+		fmt.Println("failed to read create initial admin response")
+		return err
+	} else {
+		fmt.Println("response: ", string(respBody))
+	}
+
 	return nil
 }

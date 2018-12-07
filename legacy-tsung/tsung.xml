@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!DOCTYPE tsung SYSTEM "/usr/local/share/tsung/tsung-1.0.dtd" []>
+<tsung loglevel="debug">
+
+  <clients>
+    <client host="localhost" maxusers="30000" use_controller_vm="true"/>
+  </clients>
+
+  <servers>
+    <server host="bambeapiv1.azurewebsites.net" port="80" type="tcp"/>
+  </servers>
+
+  <load duration="1" unit="minute">
+    <arrivalphase phase="1" duration="1" unit="minute">
+      <users arrivalrate="20" unit="second" maxnumber="30000"/>
+    </arrivalphase>
+  </load>
+
+  <sessions>
+    <session name="es_load" weight="1" type="ts_http">
+     <for var="counter" from="1" to="100" incr="1">
+      <request>
+      <http url="/api/message/get?username=noah&amp;entityId=4aaa22a1-236b-48a9-acfe-f617e356c1c9&amp;cache=true"
+              method="GET"
+               />
+      </request>
+     </for>
+    </session>
+  </sessions>
+</tsung>

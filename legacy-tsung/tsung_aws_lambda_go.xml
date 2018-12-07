@@ -1,0 +1,31 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!DOCTYPE tsung SYSTEM "/usr/local/share/tsung/tsung-1.0.dtd" []>
+<tsung loglevel="debug">
+
+  <clients>
+    <client host="localhost" maxusers="1000" use_controller_vm="true"/>
+  </clients>
+
+  <servers>
+    <!--<server host="ec2-54-175-175-217.compute-1.amazonaws.com" port="8080" type="tcp"/>-->
+    <server host="lj5pd8smu7.execute-api.us-east-1.amazonaws.com" port="443" type="ssl"/>
+  </servers>
+
+  <load    >
+    <arrivalphase phase="1" duration="10" unit="second">
+      <users arrivalrate="10" unit="second" maxnumber="1000"/>
+    </arrivalphase>
+  </load>
+
+  <sessions>
+    <session name="es_load" weight="1" type="ts_http">
+     <for var="counter" from="1" to="1000" incr="1">
+      <request>
+      <http url="/Prod/secret?entityid=2bdb9abd-5f89-434e-a4e4-7fdd82d71d58&amp;username=noah" method="GET" >
+          <!--<http_header name="Authorization" value="eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJVc2VyTmFtZSI6InVzZXIwMDIiLCJleHAiOjE1Mjk0NTcxMzR9.Xjqk8FUT0VwuYVwexXUeEH4swDdQtij5vNbEgt8QnfU" />-->
+      </http>
+      </request>
+     </for>
+    </session>
+  </sessions>
+</tsung>
