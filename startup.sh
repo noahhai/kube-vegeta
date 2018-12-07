@@ -10,8 +10,7 @@ kubectl create -f vegeta-rc.yaml
 
 # Create the api
 kubectl create -f api-rc.yaml
-kubectl expose rc api --type=LoadBalancer --name api --port 8000
-# kubectl expose rc api --port=8080
+# kubectl expose rc api --type=LoadBalancer --name api --port 8080
 
 # kubectl proxy --www=www --port=8001
 # http://localhost:8001/static
